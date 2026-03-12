@@ -11,8 +11,8 @@ class LspStdioTransport : public Transport {
   static constexpr std::string_view content_length_header = "Content-Length: ";
 
  public:
-  LspStdioTransport(std::istream& ins, std::ostream& outs)
-      : ins(ins), outs(outs) {}
+  LspStdioTransport(std::istream& ins, std::ostream& outs, bool newline = false)
+      : ins(ins), outs(outs), ending(newline ? "\n" : "") {}
 
   std::error_code read(std::string& content) override {
     if (ins.eof()) return std::make_error_code(std::errc::io_error);
@@ -25,13 +25,16 @@ class LspStdioTransport : public Transport {
 
   void write(std::string_view content) override {
     const std::lock_guard lock{mtx};
-    outs << content_length_header << content.length() << "\r\n\r\n"
-         << content << std::flush;
+    outs << content_length_header << (content.length() + ending.size())
+         << "\r\n\r\n"
+         << content << ending;
+    outs.flush();
   }
 
  private:
   std::istream& ins;
   std::ostream& outs;
+  std::string_view ending = "";
   mutable std::mutex mtx;
 
   std::error_code read_header(std::istream& is, size_t& content_length) {

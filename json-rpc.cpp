@@ -1,25 +1,26 @@
 #include "json-rpc/json-rpc.h"
 
 #include <iostream>
+#include <optional>
 
 #include "nlohmann/json.hpp"
 
-void JsonRpcTransport::notify(std::string_view method,
+void JsonRpcTransport::notify(std::string method,
                               std::optional<json> params) {
   json message = {
       {"jsonrpc", "2.0"},
-      {"method", method},
+      {"method", std::move(method)},
   };
   if (params) message.emplace("params", std::move(*params));
   send(std::move(message));
 }
 
-void JsonRpcTransport::call(json id, std::string_view method,
+void JsonRpcTransport::call(json id, std::string method,
                             std::optional<json> params) {
   json message = {
       {"jsonrpc", "2.0"},
       {"id", std::move(id)},
-      {"method", method},
+      {"method", std::move(method)},
   };
   if (params) message.emplace("params", std::move(*params));
   send(std::move(message));
@@ -33,13 +34,12 @@ void JsonRpcTransport::reply(json id, json result) {
   });
 }
 
-void JsonRpcTransport::error(json id, int code, std::string message,
-                             std::optional<json> data) {
+void JsonRpcTransport::error(json id, const JsonRpcError& err) {
   json error = {
-      {"code", code},
-      {"message", std::move(message)},
+      {"code", err.code()},
+      {"message", err.message()},
   };
-  if (data) error.emplace("data", std::move(*data));
+  if (err.data()) error.emplace("data", err.data().value());
   send(json{
       {"jsonrpc", "2.0"},
       {"id", std::move(id)},
@@ -103,7 +103,10 @@ void JsonRpcTransport::send(const json& message) {
 
 bool JsonRpcTransport::handle_message(json message, JsonRpcHandler& handler) {
   if (!message.is_object() || message.value("jsonrpc", "") != "2.0") {
-    log_error("not a jsonrpc message", message);
+    std::string err_msg = "not a jsonrpc message";
+    log_error(err_msg, message);
+    error(message.value("id", json{nullptr}),
+          JsonRpcRuntimeError(JsonRpcErrc::InvalidRequest, std::move(err_msg)));
     return true;
   }
 
@@ -111,8 +114,9 @@ bool JsonRpcTransport::handle_message(json message, JsonRpcHandler& handler) {
     if (!method_it->is_string()) {
       std::string err_msg = "'method' is not a string";
       log_error(err_msg, message);
-      error(message.value("id", json{nullptr}), JsonRpcErrc::InvalidRequest,
-            std::move(err_msg), std::nullopt);
+      error(
+          message.value("id", json{nullptr}),
+          JsonRpcRuntimeError(JsonRpcErrc::InvalidRequest, std::move(err_msg)));
       return true;
     }
 
@@ -129,8 +133,8 @@ bool JsonRpcTransport::handle_message(json message, JsonRpcHandler& handler) {
   if (id_it == message.end()) {
     std::string err_msg = "message has no 'id'";
     log_error(err_msg, message);
-    error(nullptr, JsonRpcErrc::InvalidRequest, std::move(err_msg),
-          std::nullopt);
+    error(nullptr,
+          JsonRpcRuntimeError{JsonRpcErrc::InvalidRequest, std::move(err_msg)});
     return true;
   }
 
@@ -141,6 +145,7 @@ bool JsonRpcTransport::handle_message(json message, JsonRpcHandler& handler) {
     if (!error_it->is_object()) {
       log_error("invalid error message format: message is not an object",
                 message);
+
       return true;
     }
     auto err_code_it = error_it->find("code");
@@ -163,9 +168,30 @@ bool JsonRpcTransport::handle_message(json message, JsonRpcHandler& handler) {
 
   std::string err_msg = "none of 'method', 'result' or 'error' provided";
   log_error(err_msg, message);
-  std::cerr << "jsonrpc: "
-            << "\n";
-  error(message.value("id", json{nullptr}), JsonRpcErrc::InvalidRequest,
-        "none of 'method', 'result' or 'error' provided", std::nullopt);
+  error(message.value("id", json{nullptr}),
+        JsonRpcRuntimeError{JsonRpcErrc::InvalidRequest, std::move(err_msg)});
   return true;
+}
+
+std::string JsonRpcError::message() const {
+  switch (_code) {
+    case JsonRpcErrc::ParseError:
+      return "parse error";
+    case JsonRpcErrc::InvalidRequest:
+      return "invalid request";
+    case JsonRpcErrc::MethodNotFound:
+      return "method not found";
+    case JsonRpcErrc::InvalidParams:
+      return "invalid params";
+    case JsonRpcErrc::InternalError:
+      return "internal error";
+    default:
+      if (-32000 <= _code && _code <= -32099) return "server error";
+      return "unknown error";
+  }
+}
+
+const std::optional<json>& JsonRpcError::data() const {
+  static const std::optional<json> no_data = std::nullopt;
+  return no_data;
 }
